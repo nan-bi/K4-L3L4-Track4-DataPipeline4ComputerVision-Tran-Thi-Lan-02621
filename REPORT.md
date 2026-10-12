@@ -11,8 +11,8 @@
 
 ## Kết quả cuối
 
-- `dataset_version` của bạn: `<điền sau khi chạy step 4>`  (phải khớp `report/evidence/run_summary.json`)
-- Số khung hình train / val / test của bạn: `<điền sau khi chạy step 4>`
+- `dataset_version` của bạn: `1b3e46f81d3f`  (phải khớp `report/evidence/run_summary.json`)
+- Số khung hình train / val / test của bạn: `train: 686 (18 trips), val: 167 (4 trips), test: 166 (4 trips) — tổng: 1019 khung hình (26 trips)`
 - `report/verify.txt`: tạo bằng `python3 scripts/check_submission.py --save-verify` (phải có `27/27 checks passed`).
 - Ảnh chụp trong `report/screenshots/`: `airflow_graph.png`, `minio_lake.png`, `metabase_dashboard.png`, và ảnh bài tập sập/chạy lại (log task đỏ thấy trip của bạn).
 
@@ -38,20 +38,22 @@ Pipeline đưa hai nguồn về một schema như thế nào (đơn vị, kiểu
 Pipeline chuẩn hóa hai nguồn trong `stg_telemetry_a.sql` và `stg_telemetry_b.sql`:
 - **Đơn vị tốc độ**: B được chia cho 3.6 (`spd_kmh / 3.6 → speed_mps`) để về m/s như A.
 - **Kiểu thời gian**: B chuyển từ epoch ms sang timestamptz bằng `to_timestamp((timestamp_ms - offset_ms) / 1000.0)`.
-- **Độ lệch đồng hồ**: `telemetry_clock_offset_ms = 1500 ms` (khai báo trong `sources.json`) được đọc từ `bronze.video_files` và trừ đi, khiến thời điểm bắt đầu của B khớp với video (`2025-10-08 14:30:00 UTC`).
+- **Độ lệch đồng hồ**: `telemetry_clock_offset_ms = 1500 ms` (khai báo trong `sources.json`) được đọc từ `bronze.video_files` và trừ đi, khiến thời điểm bắt đầu của B khớp với video (`2025-10-08 14:30:00 UTC`). Bằng chứng là mẫu telemetry đầu tiên của B xuất hiện lúc `2025-10-08 14:30:00.009000+00:00`, chỉ lệch video 9 ms (trong ngưỡng cho phép 500 ms).
 - **Bàn đạp**: B chia 100 để đưa về tỷ lệ 0–1.
 - **Tên cột**: tất cả đổi về schema thống nhất (`lat`, `lon`, `acc_x`, `acc_y`, `gas`, `brake`, `steer`).
 
-Bảng quarantine (điền số liệu từ `report/evidence/run_summary.json` sau khi chạy):
+Bảng quarantine (số liệu thực tế từ `report/evidence/run_summary.json`):
 
 | drive_id | reject_reason | số dòng |
 |---|---|---|
-| drive_a | duplicate | `<điền>` |
-| drive_a | speed_missing | `<điền>` |
-| drive_a | speed_out_of_range | `<điền>` |
-| drive_b | duplicate | `<điền>` |
-| drive_b | speed_missing | `<điền>` |
-| drive_b | speed_out_of_range | `<điền>` |
+| drive_a | duplicate | 20 |
+| drive_a | speed_missing | 30 |
+| drive_a | speed_out_of_range | 3 |
+| drive_b | duplicate | 20 |
+| drive_b | speed_missing | 30 |
+| drive_b | speed_out_of_range | 3 |
+
+Tổng số dòng nhận: drive_a nhận 3021 dòng (2968 sạch + 53 quarantine); drive_b nhận 3234 dòng (3181 sạch + 53 quarantine). Tổng clean + quarantined đúng bằng số dòng thô từ CSV.
 
 Dòng lỗi vào `silver.silver_telemetry_rejects` thay vì bị xoá vì: **dữ liệu xấu vẫn là bằng chứng**. Nếu xoá im lặng, không ai biết bao nhiêu dòng bị bỏ và vì lý do gì. Quarantine cho phép kiểm toán (audit), tái hiện vấn đề, và sau này có thể khôi phục nếu luật cách ly thay đổi. Đây là nguyên tắc "never silently drop data" của kiến trúc medallion.
 
@@ -59,104 +61,111 @@ Dòng lỗi vào `silver.silver_telemetry_rejects` thay vì bị xoá vì: **d�
 Vì sao test `max_gap_ms` là `warn` còn `in_range` là `error`? Kết quả thí nghiệm `break-gate` của bạn (`break_gate.json`): test nào bắt được, bao nhiêu dòng, và điều đó cho biết gì về vai trò của "cổng chất lượng"?
 
 Trong `dbt/models/schema.yml`, test `max_gap_ms` có cấu hình `severity: warn` còn `in_range` không có cấu hình đặc biệt nên mặc định là `error`. Lý do:
-- `max_gap_ms` kiểm tra khoảng cách thời gian tối đa giữa hai dòng telemetry liên tiếp. **Khoảng cách lớn là điều bình thường** khi cảm biến mất tín hiệu ngắn (GPS loss, nhiễu) — pipeline vẫn có thể tiếp tục hoạt động bình thường, chỉ cần biết để cảnh báo.
-- `in_range` kiểm tra tốc độ trong khoảng hợp lệ (0–70 m/s). Tốc độ âm hoặc vượt 70 m/s là **dữ liệu vô lý về vật lý**, không thể xảy ra; để lọt vào gold sẽ làm hỏng mô hình học máy.
+- `max_gap_ms` kiểm tra khoảng cách thời gian tối đa giữa hai dòng telemetry liên tiếp. **Khoảng cách lớn là điều bình thường** khi cảm biến mất tín hiệu ngắn (GPS loss, nhiễu hầm) — pipeline vẫn có thể tiếp tục hoạt động bình thường, chỉ cần đưa cảnh báo (WARN) để người vận hành lưu ý.
+- `in_range` kiểm tra tốc độ trong khoảng hợp lệ (0–70 m/s). Tốc độ âm hoặc vượt 70 m/s là **dữ liệu vô lý về mặt vật lý**, không thể xảy ra đối với xe thật; nếu để lọt vào gold sẽ làm méo mó các phân phối dữ liệu và làm hỏng mô hình học máy.
 
-Kết quả thí nghiệm `break-gate` (điền sau khi chạy `scripts/lab.sh exp break-gate`):
-
-Khi nới luật từ 70 m/s lên 1000 m/s, test `in_range` của `silver_telemetry` **bắt được `<điền>` dòng** tốc độ vô lý vào silver. Cổng chất lượng (dbt test) chính là cơ chế **dừng pipeline ngay** nếu dữ liệu xấu vượt qua staging — đảm bảo gold không bao giờ chứa dữ liệu không hợp lệ. Khi khôi phục luật gốc, test trả về PASS, xác nhận pipeline ổn định.
+Kết quả thí nghiệm `break-gate` (từ `report/evidence/break_gate.json`):
+Khi nới luật làm sạch từ 70 m/s lên 1000 m/s, test `in_range_silver_telemetry_speed_mps__70__0` đã **bắt được 6 dòng** tốc độ vô lý lọt vào silver (3 dòng ở drive_a và 3 dòng ở drive_b). Kết quả kiểm tra dbt test: `PASS=5 WARN=1 ERROR=1 SKIP=0`. Test báo ERROR và chặn đứng pipeline ngay tại cổng chất lượng của silver. Sau khi khôi phục lại luật gốc (`max_speed_mps = 70`), kết quả trả về `PASS=6 WARN=1 ERROR=0 SKIP=0`. Điều này chứng minh cổng chất lượng hoạt động như một chốt chặn bảo vệ: dữ liệu không đạt chuẩn không bao giờ được phép đi tiếp sang lớp gold.
 
 ## Bước 3 · Silver frames
 
 ### Câu 4
 Dựa vào `idempotency.json`: số dòng trước và sau hai lần chạy lại, và khi ghi kiểu `append`. Vì sao Delta `overwrite` theo partition (một trip) an toàn hơn xoá rồi ghi lại, nhất là khi giữa chừng có lỗi?
 
-Dựa vào `report/evidence/idempotency.json` sau khi chạy thí nghiệm:
+Dựa vào `report/evidence/idempotency.json` thu được từ thí nghiệm:
 
-- **Số dòng trước**: `<điền: rows_before>` dòng toàn bảng silver.frames
-- **Sau 2 lần chạy lại cùng trip**: `<điền: rows_after_two_reruns>` dòng — **không đổi**
-- **Dấu vân tay (fingerprint)**: `<điền: fingerprint_before>` → `<điền: fingerprint_after>` — **giống hệt**
-- **Cách sai (append × 2)**: `<điền: append_variant_rows>` dòng — **nhân đôi** so với trip gốc
+- **Số dòng trước khi chạy lại**: `1246` dòng toàn bảng `silver.frames`
+- **Sau 2 lần chạy lại cùng trip (trip-00003)**: `1246` dòng — **hoàn toàn không đổi**
+- **Dấu vân tay (fingerprint)**: `6c7480dfde7e` → `6c7480dfde7e` — **giống hệt nhau**
+- **Cách sai (append × 2)**: trip có 60 khung hình ban đầu bị nhân đôi thành `120` dòng (tăng 2x dữ liệu rác)
 
-Delta Lake `overwrite` theo predicate (`WHERE trip_id = 'trip-xxx'`) an toàn hơn "xoá rồi ghi" vì: (1) Thao tác là **atomic** — hoặc ghi xong hoàn toàn hoặc không ghi gì — không có trạng thái nửa vời. (2) Nếu worker sập giữa chừng, commit Delta chưa được ghi, và lần chạy lại sẽ thấy partition vẫn là dữ liệu cũ hợp lệ, không phải bảng trống. (3) **Chỉ partition đó** bị ghi đè — 25 trip còn lại không bị ảnh hưởng. Ngược lại, "xoá + ghi lại" tạo ra khoảng thời gian bảng rỗng, và nếu ghi lại thất bại, dữ liệu biến mất vĩnh viễn.
+Delta Lake `overwrite` theo predicate (`WHERE trip_id = 'trip-xxx'`) an toàn hơn "xoá rồi ghi" vì: (1) Thao tác là **atomic (nguyên tử)** qua transaction log của Delta Lake — hoặc commit toàn bộ thành công hoặc rollback hoàn toàn, không có trạng thái nửa chừng. (2) Nếu tiến trình sập giữa chừng, transaction chưa được commit nên phiên bản trước đó vẫn nguyên vẹn; người dùng truy vấn vẫn thấy dữ liệu cũ hợp lệ thay vì thấy bảng trống. (3) **Chỉ partition đó** bị ghi đè, 25 trip còn lại trong lake hoàn toàn không bị ảnh hưởng. Ngược lại, cách "xoá rồi ghi lại" tạo ra cửa sổ thời gian bảng rỗng (downtime), và nếu việc ghi lại gặp lỗi, dữ liệu sẽ mất vĩnh viễn mà không thể tự phục hồi.
 
 ### Câu 5
 Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline xử lý khác nhau ra sao, bạn có đồng ý không? Dựa vào `threshold.json`: nếu chọn ngưỡng 0, 2, 6 thì bao nhiêu khung bị coi là trùng ở mỗi drive? Bạn chọn ngưỡng nào, vì sao, và ngưỡng đó phụ thuộc vào tốc độ xe thế nào?
 
-**Khung đen** (`is_black`): độ sáng trung bình (luma) dưới ngưỡng `dark_luma = 12.0` — camera bị che, hỏng, hoặc đoạn video bị lỗi. Đây là **lỗi kỹ thuật**, frame không có giá trị cho training → bị **loại bỏ khỏi gold**.
+**Khung đen** (`is_black`): độ sáng trung bình (luma) dưới ngưỡng `dark_luma = 12.0` — camera bị che, hỏng cáp, hoặc đầu ghi lỗi kỹ thuật. Khung này hoàn toàn mất thông tin hình ảnh, không có giá trị học máy → pipeline gắn cờ và **loại bỏ khỏi gold** (drive_a có 6 khung, drive_b có 4 khung).
 
-**Khung tối** (`is_dark`): luma trong khoảng [12, 40) — xe đi qua đường hầm, bóng râm, hay cảnh đêm. Đây là **điều kiện thực tế** mà mô hình cần học → được **gắn cờ nhưng giữ lại**. Tôi đồng ý với cách xử lý này vì đường hầm và điều kiện thiếu sáng là các tình huống thực tế mà xe tự lái cần nhận diện được.
+**Khung tối** (`is_dark`): luma trong khoảng [12, 40) — xe đi qua đường hầm, bóng cây, hoặc điều kiện chập tối. Đây là **tình huống vận hành thực tế** mà mô hình tự lái bắt buộc phải học để nhận diện đường trong điều kiện thiếu sáng → pipeline **gắn cờ chất lượng nhưng giữ lại** (`dark_kept`: drive_a có 4 khung, drive_b có tới 61 khung). Tôi hoàn toàn đồng ý với thiết kế này vì nó phân biệt rành mạch giữa lỗi phần cứng (đen) và điều kiện môi trường tự nhiên (tối).
 
-| dHash khác tối đa | số khung trùng, drive A | số khung trùng, drive B |
+Số khung bị coi là trùng theo ngưỡng dHash (số liệu từ `report/evidence/threshold.json`):
+
+| dHash khác tối đa | số khung trùng, drive A (tổng 602) | số khung trùng, drive B (tổng 644) |
 |---|---|---|
-| 0 | `<điền từ threshold.json>` | `<điền từ threshold.json>` |
-| 2 | `<điền từ threshold.json>` | `<điền từ threshold.json>` |
-| 6 | `<điền từ threshold.json>` | `<điền từ threshold.json>` |
+| 0 | 61 | 8 |
+| 2 | 149 | 53 |
+| 6 | 363 | 244 |
 
-Pipeline chọn ngưỡng **2 bit** (mặc định `dup_hamming = 2`). Ngưỡng này hợp lý vì: ngưỡng 0 chỉ bắt frame y hệt (quá chặt, bỏ sót nhiều frame gần như trùng); ngưỡng 6 loại quá nhiều, có thể bỏ qua frame thực sự khác nhau. Với xe chạy chậm (< 10 km/h), hai frame liên tiếp 0.5 giây cách nhau chỉ dịch chuyển ~1.4 m nên dễ bị coi là trùng. Với xe chạy nhanh (60 km/h), 0.5 giây = 8 m, cảnh thay đổi nhiều hơn → ít bị coi là trùng. Vì vậy ngưỡng 2 là cân bằng tốt cho tốc độ trung bình của dataset này.
+Pipeline chọn ngưỡng **2 bit** (`dup_hamming = 2`). Đây là lựa chọn tối ưu vì: ngưỡng 0 bit chỉ bắt các khung hoàn toàn giống nhau từng pixel sau hash (quá chặt, bỏ sót các khung xe đứng yên nhưng nhiễu sensor nhẹ); trong khi ngưỡng 6 bit quá lỏng, loại tới hơn 50% khung hình và làm mất cả những khung xe đang vào cua hay chuyển động chậm. Về tốc độ xe: khi xe chạy chậm (< 10 km/h), khoảng cách di chuyển giữa 2 khung hình (0.5s) chỉ khoảng 1.4 m nên độ tương đồng hình ảnh rất cao → khung trùng nhiều (drive_a xe đi chậm và bị đứng hình camera 6s nên có tới 149 khung trùng ở t2). Khi xe chạy nhanh (60-80 km/h), mỗi 0.5s xe đi được 8-11 m, cảnh vật thay đổi liên tục → tỷ lệ khung trùng giảm rõ rệt (drive_b chỉ có 53 khung trùng ở t2).
 
 ## Bước 4 · Gold
 
 ### Câu 6
 Dựa vào `leakage.json`: chia theo khung hình làm bao nhiêu trip bị chia cắt, so với chia theo trip? Vì sao điều này làm điểm kiểm thử đẹp một cách giả tạo?
 
-Dựa vào `report/evidence/leakage.json`:
+Dựa vào `report/evidence/leakage.json` từ thí nghiệm:
 
-- **Chia theo khung hình** (random 70/15/15): `<điền: per_frame_split_trips_straddling>` trip bị chia cắt ra nhiều split; `<điền: per_frame_split_trips_in_both_train_and_test>` trip có khung ở cả train lẫn test.
-- **Chia theo trip** (gold pipeline): `0` trip bị chia cắt — mỗi trip chỉ nằm trong **một** split duy nhất.
+- **Chia theo khung hình ngẫu nhiên** (random 70/15/15): có **26/26 trip** bị chia cắt ra nhiều hơn một split; và toàn bộ **26/26 trip** đều có khung hình xuất hiện ở cả tập train lẫn test (100% số trip bị rò rỉ).
+- **Chia theo trip** (gold pipeline): **0 trip** bị chia cắt — mỗi trip trọn vẹn chỉ nằm trong đúng một split duy nhất.
 
-Khi chia theo khung hình ngẫu nhiên, các khung liền kề trong cùng một trip (chỉ cách nhau 0.5 giây, gần như giống hệt nhau) bị tách ra: một nửa vào train, một nửa vào test. Mô hình học máy thực chất đã "thấy" cảnh đó trong training. Khi test, nó nhận ra cảnh quen thuộc và cho điểm cao — nhưng đây là **data leakage**, không phải khả năng tổng quát hóa thực sự. Chia theo trip đảm bảo mỗi **cảnh** (trip) chỉ xuất hiện ở một phía, buộc mô hình phải tổng quát hóa sang **cảnh mới hoàn toàn**.
+Khi chia theo khung hình ngẫu nhiên, các khung hình kế cận nhau trong cùng một chuyến đi chỉ cách nhau 0.5 giây và gần như giống hệt nhau về quang cảnh, góc nhìn, phương tiện xung quanh và ánh sáng. Việc đưa khung này vào train và khung liền kề vào test thực chất là làm "lộ đề thi": mô hình deep learning có khuynh hướng ghi nhớ (memorize) các chi tiết cảnh nền cụ thể hơn là học các quy luật lái xe tổng quát. Khi đánh giá trên tập test bị rò rỉ, mô hình đạt độ chính xác rất cao giả tạo (optimistic metric), nhưng khi đem triển khai trên xe thật chạy ở một cung đường mới lạ, hệ thống sẽ thất bại nghiêm trọng. Chia theo trip (cảnh) đảm bảo tập test kiểm tra đúng năng lực tổng quát hóa (generalization) của mô hình.
 
 ### Câu 7
 Vì sao `dataset_version` là **băm nội dung** chứ không phải ngày giờ hay số đếm? Hai lần chạy liên tiếp cho kết quả gì? Vì sao `dataset_version` của bạn **khác** bạn bè dù cùng dữ liệu (liên hệ MSSV)?
 
-`dataset_version` là **băm SHA256 của nội dung dataset** (danh sách frame_id, frame_uri, split theo thứ tự xác định) vì:
-1. **Deterministic**: Cùng một nội dung → cùng một hash, bất kể chạy lúc nào, máy nào.
-2. **Content-addressable**: Hash thay đổi khi và chỉ khi nội dung thay đổi. Ngày giờ có thể trùng hoặc thay đổi dù nội dung không đổi.
-3. **Reproducibility**: Giảng viên chạy lại bài của bạn với cùng MSSV phải ra đúng cùng `dataset_version`.
+`dataset_version` là **chuỗi băm nội dung (content hash)** (12 ký tự hex) vì các nguyên do thiết kế lakehouse cốt lõi:
+1. **Tính tất định (Deterministic & Idempotent)**: Cùng một tập dữ liệu đầu vào và luật xử lý sẽ luôn cho ra cùng một chuỗi băm, bất kể chạy lại bao nhiêu lần, ở múi giờ nào hay trên máy nào.
+2. **Định danh theo nội dung (Content-addressable)**: Phiên bản chỉ thay đổi khi và chỉ khi dữ liệu hoặc nhãn thực sự thay đổi. Nếu dùng ngày giờ hoặc số đếm tăng dần, mỗi lần trigger pipeline sẽ sinh ra một phiên bản mới dù dữ liệu y hệt, gây lãng phí lưu trữ và nhầm lẫn cho việc huấn luyện mô hình.
+3. **Khả năng kiểm chứng độc lập**: Giảng viên có thể chạy lại pipeline với cùng MSSV của tôi và kiểm tra xem chuỗi hash có khớp chính xác `1b3e46f81d3f` hay không.
 
-**Hai lần chạy liên tiếp** với cùng MSSV và cùng dữ liệu cho ra **cùng `dataset_version`** — xác nhận pipeline deterministic.
+**Hai lần chạy liên tiếp** với cùng MSSV và cùng bộ dữ liệu cho ra **cùng `dataset_version` = `1b3e46f81d3f`** — xác nhận tính deterministic tuyệt đối.
 
-`dataset_version` của mỗi người khác nhau vì: trong `gold_dataset_frames.sql`, thứ tự trip được xáo trộn bằng `md5(trip_id || LAB_STUDENT_ID)`. MSSV được "trộn" vào hàm băm, làm thứ tự trip thay đổi → split train/val/test khác → danh sách frame_id trong mỗi split khác → hash nội dung khác. Đây là cơ chế đảm bảo mỗi sinh viên có kết quả riêng và không thể copy bài nhau.
+`dataset_version` của tôi khác bạn bè vì: trong `dbt/models/gold/gold_dataset_frames.sql`, thứ tự trip được xáo trộn bằng hàm `md5(trip_id || '{{ env_var("LAB_STUDENT_ID", "") }}')`. MSSV `2A202602621` đóng vai trò là "salt" làm thay đổi thứ tự sắp xếp ngẫu nhiên của các trip trong từng drive → phân bổ trip vào train/val/test khác nhau → tập frame_id và manifest khác nhau → chuỗi hash nội dung cuối cùng là duy nhất cho từng sinh viên.
 
 ### Câu 8
 Đọc phần `lineage` trong `manifest.json` của dataset bạn. Trả lời "dataset này được tạo từ dữ liệu nào?" bằng chính nội dung đó. Nếu một người hỏi 3 tháng sau, thông tin nào giúp tái tạo lại đúng dataset này?
 
-Đọc `manifest.json` trong `lake/gold/datasets/<version>/manifest.json` (điền sau khi chạy step 4):
+Trích xuất trực tiếp từ `lake/gold/datasets/1b3e46f81d3f/manifest.json`:
 
-Dataset phiên bản `<dataset_version>` được tạo từ:
-- **Video nguồn**: `drive_a.mp4` (sha256: `<điền từ manifest.json lineage>`), `drive_b.mp4` (sha256: `<điền>`)
-- **Bảng silver**: `silver.silver_frame_telemetry` tại version commit `<điền>`, `silver.silver_telemetry` tại version `<điền>`
-- **Tham số**: `split_train=0.70`, `split_val=0.15`, `dup_hamming=2`, `sync_tol_ms=150`, `LAB_STUDENT_ID=2A202602621`
-- **Thời điểm tạo**: `<điền: finished_at từ run_summary.json>`
+Dataset phiên bản `1b3e46f81d3f` được tạo thành từ:
+- **Video nguồn**: 
+  + `drive_a.mp4`: sha256 = `636ba1a98dfc5ba665d1c935e1d2064e69f4df360ff9ffbd15795957d5e7e9aa`
+  + `drive_b.mp4`: sha256 = `bfa62703f645ff77a8578ae3fc74a00881140d38a404d43c8e2af265bbee9fdc`
+- **Các phiên bản bảng upstream (Delta commit versions)**:
+  + `bronze.raw_telemetry_a`: v0, `bronze.raw_telemetry_b`: v0, `bronze.trips_raw`: v0, `bronze.video_files`: v1
+  + `silver.frames`: v25, `silver.telemetry`: v0, `silver.frames_flagged`: v0, `silver.frame_telemetry`: v0
+- **Tham số quy hoạch**: `split_train = 0.70`, `split_val = 0.15`, `dup_hamming = 2`, `sync_tol_ms = 150`, `LAB_STUDENT_ID = 2A202602621`
+- **Thời điểm tạo**: `2026-10-12T13:41:34.196448+00:00`
+- **Mã băm manifest**: sha256 = `b3246f5dafc79379d1af4a5b4b4d332609d34527093315881a620407531a1eff`
 
-Để tái tạo lại đúng dataset 3 tháng sau, cần: (1) file video gốc với sha256 khớp, (2) cùng MSSV `2A202602621`, (3) cùng tham số dbt trong `dbt_project.yml`, (4) cùng commit của mã pipeline. Phần `lineage` trong `manifest.json` lưu đủ các thông tin này như một "hóa đơn vật liệu" (bill of materials) của dataset.
+Nếu một người hỏi sau 3 tháng, những thông tin cần thiết để tái tạo chính xác 100% dataset này gồm: (1) Hai file video gốc có đúng mã sha256 nêu trên; (2) Đúng MSSV `2A202602621` trong biến môi trường; (3) Đúng commit mã nguồn pipeline và dbt models; (4) Khả năng time-travel trong Delta Lake quay về đúng các commit version của từng bảng bronze và silver được ghi nhận trong mục `lineage`.
 
 ## Bước 5 · Điều phối và phục vụ
 
 ### Câu 9
 Mô tả chính xác điều xảy ra khi trip của bạn sập rồi chạy lại: bao nhiêu task chuyển đỏ, bao nhiêu task `upstream_failed`, bạn clear gì, dữ liệu có nhân đôi không, `dataset_version` có đổi không? Bằng chứng (ảnh, số) là gì?
 
-Trip của tôi được tính theo MSSV: `int(2A202602621) % 26 → trip-07900` (drive_a, 08:00:37–08:00:52 UTC).
+Trip được gán cho MSSV của tôi: `2A202602621 % 26 → trip-07900` (thuộc drive_a).
 
-Khi đặt `LAB_FAIL_ONCE=trip-07900` và trigger DAG:
-- **1 task** `silver_frames[trip-07900]` chuyển **đỏ** (log hiện `simulated crash while extracting trip-07900`)
-- Các task phụ thuộc sau (`dbt_run_silver`, `dbt_test_silver`, `dbt_run_gold`, `dbt_test_gold`, `publish_lake`, `export_dataset`, `publish_warehouse`) chuyển sang `upstream_failed` — tổng cộng **`<điền>` task bị ảnh hưởng**
-- **Clear duy nhất task đỏ** `silver_frames[trip-07900]`: task chạy lại thành công, DAG chuyển xanh toàn bộ
-- **Dữ liệu không nhân đôi**: Delta overwrite theo partition trip-07900, nên dù chạy lại, số dòng của trip đó vẫn bằng lần đầu
-- **`dataset_version` không đổi**: vì nội dung gold cuối cùng giống hệt — cùng frames, cùng split, cùng MSSV
-- **Bằng chứng**: ảnh `report/screenshots/airflow_crash.png` (log task đỏ thấy chữ "simulated crash trip-07900") và `report/screenshots/airflow_graph.png` (DAG xanh sau khi clear)
+Khi đặt biến môi trường `LAB_FAIL_ONCE=trip-07900` và kích hoạt DAG `day09_video_pipeline`:
+- **Đúng 1 task** `silver_frames[trip-07900]` bị thất bại và chuyển **màu đỏ** (trong log ghi rõ: `simulated crash while extracting trip-07900`).
+- Các task độc lập khác (các trip khác) vẫn chạy bình thường và chuyển xanh.
+- Toàn bộ **7 task downstream** phụ thuộc phía sau bị dừng lại và chuyển trạng thái **`upstream_failed`** gồm: `dbt_run_silver`, `dbt_test_silver`, `dbt_run_gold`, `dbt_test_gold`, `publish_lake`, `export_dataset`, `publish_warehouse`.
+- Khi tôi nhấn **Clear** đối với duy nhất task đỏ `silver_frames[trip-07900]`, Airflow chỉ lên lịch chạy lại riêng task này và các task phụ thuộc downstream, không phải chạy lại 25 task trích xuất khác.
+- **Dữ liệu không bị nhân đôi**: Nhờ cơ chế Delta overwrite theo partition `trip_id = 'trip-07900'`, số khung hình ghi vào lake vẫn giữ nguyên là 1246 khung hình.
+- **`dataset_version` không đổi**: vẫn là `1b3e46f81d3f` vì dữ liệu cuối cùng và hash nội dung không thay đổi.
+- **Bằng chứng**: Ảnh `report/screenshots/airflow_crash_log.png` ghi lại log lỗi của task trip-07900 và `report/screenshots/airflow_graph.png` thể hiện toàn bộ DAG xanh hoàn chỉnh.
 
 ### Câu 10
 Nâng từ 2 drive lên **500 xe mỗi ngày**: ba thành phần nào của pipeline này sẽ vỡ đầu tiên, và bạn thay bằng gì (nối với slide 12, 22, 23)?
 
-Ba thành phần sẽ vỡ đầu tiên khi scale lên 500 xe/ngày:
+Khi mở rộng quy mô từ 2 chuyến xe lên 500 xe/ngày (khoảng 13.000 chuyến, hàng triệu khung hình và hàng chục GB telemetry mỗi ngày):
 
-1. **FFmpeg decode tuần tự (Airflow LocalExecutor, `max_active_tis_per_dagrun=1`)**: Hiện tại chỉ chạy 1 trip song song, 500 xe × ~26 trip/xe = 13.000 task/ngày sẽ mất hàng chục giờ. **Giải pháp**: Chuyển sang distributed executor (Celery/Kubernetes Executor), dùng GPU decode batch với `ffmpeg`-based worker pool, hoặc dedicated video processing service như AWS Elemental (slide 24).
+1. **Bộ giải mã FFmpeg cục bộ (LocalExecutor trên 1 máy)** (Slide 24): Hiện tại FFmpeg decode trên CPU tuần tự từng trip. Với 13.000 trip/ngày, thời gian CPU cần thiết sẽ lên đến hàng trăm giờ máy, gây nghẽn hoàn toàn. **Giải pháp**: Tách video decoding thành một microservice phi tập trung (serverless worker pool trên Kubernetes / AWS Batch), sử dụng card GPU chuyên dụng (NVDEC) để tăng tốc decode phần cứng, kết hợp distributed queue như Kafka/Celery để phân tải.
 
-2. **DuckDB + single-node processing**: DuckDB chạy trong một container đơn, không thể xử lý song song nhiều DAG run. **Giải pháp**: Thay bằng Spark hoặc Flink cho xử lý phân tán (slide 22), hoặc dbt Cloud với Snowflake/BigQuery làm warehouse scale-out.
+2. **DuckDB chạy trên một node đơn lẻ** (Slide 22): DuckDB là embedded in-process database rất nhanh nhưng bị giới hạn bởi RAM và CPU của máy chủ chứa container. Khi xử lý hàng trăm triệu dòng telemetry và hàng triệu bounding box/frame, bộ nhớ sẽ bị tràn (OOM). **Giải pháp**: Chuyển đổi tầng ELT sang công nghệ tính toán phân tán như Apache Spark (Databricks) hoặc Apache Flink để xử lý streaming/batch song song trên cụm nhiều node.
 
-3. **MinIO single-node object storage**: Một MinIO container không đủ throughput và IOPS cho 500 xe ghi đồng thời (mỗi xe có thể tạo hàng nghìn frame/ngày). **Giải pháp**: Thay bằng S3/GCS (managed, scale tự động), dùng Delta Lake với multi-writer commit protocol, thêm partition strategy theo ngày/xe (slide 17, 23).
+3. **MinIO single-node lưu trữ đối tượng** (Slide 17, 23): Một MinIO container cục bộ sẽ nhanh chóng cạn kiệt dung lượng đĩa cứng và nghẽn băng thông I/O mạng khi hàng trăm xe đồng thời đẩy dữ liệu lên. **Giải pháp**: Chuyển sang dịch vụ Object Storage đám mây thực thụ (AWS S3, Google Cloud Storage) có khả năng scale vô hạn về throughput và dung lượng, áp dụng chính sách vòng đời lưu trữ (Lifecycle rules: hot/warm/cold tiering) để tối ưu chi phí lưu trữ lâu dài.
 
 ## Câu hỏi riêng của bạn trên Metabase
 
